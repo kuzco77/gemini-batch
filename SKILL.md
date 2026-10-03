@@ -54,34 +54,100 @@ anyone who can read it can use the account.
 
 ## Running a batch
 
+Prefer the flags — they take any path, so nothing has to be copied into the
+project first.
+
+Single image, exact output file:
+
 ```bash
-cd ~/Developer/Personal/gemini-batch
-cp /path/to/images/*.jpg in/
-PROMPT="your editing instruction" node gemini-batch.mjs
+node gemini-batch.mjs \
+  --in ~/Downloads/photo.jpg \
+  --out ~/Downloads/photo-fixed.png \
+  --prompt "your editing instruction"
 ```
 
-Outputs go to `out/<original-name>_out.png`. Always PNG — the image is read off
-a canvas.
+A whole folder:
 
-Exit codes: `0` clean, `1` some images failed (see `out/failures.json`),
-`2` fatal (rate limited or crashed; re-run later to resume).
+```bash
+node gemini-batch.mjs \
+  --in ~/Downloads/raw \
+  --out ~/Downloads/edited \
+  --prompt "your editing instruction"
+```
+
+`--in` takes a file or a directory. `--out` ending in `.png` names the file
+directly; anything else is a directory, and outputs land in it as
+`<original-name>_out.png`. `--out` as a `.png` file with `--in` as a directory
+is rejected. Output is always PNG — the pixels are read off a canvas.
+
+Add `--force` to regenerate images whose output already exists.
 
 ### Configuration
 
-All via environment variables:
+Flags win over environment variables.
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `PROMPT` | a portrait skin-smoothing prompt | The editing instruction |
-| `IN_DIR` | `./in` | Source images (`.jpg`/`.jpeg`/`.png`/`.webp`) |
-| `OUT_DIR` | `./out` | Destination |
-| `CDP_URL` | `http://localhost:9222` | Chrome debug endpoint |
-| `GEN_TIMEOUT` | `240000` | Max wait per image, ms |
-| `DELAY_MS` | `8000` | Pause between images, ms |
-| `MAX_RETRY` | `2` | Retries per image |
+| Flag | Env | Default | Purpose |
+|---|---|---|---|
+| `--prompt` | `PROMPT` | a portrait skin-smoothing prompt | The editing instruction |
+| `--in` | `IN_DIR` | `./in` | Source image or directory |
+| `--out` | `OUT_DIR` | `./out` | Destination file or directory |
+| `--cdp` | `CDP_URL` | `http://localhost:9222` | Chrome debug endpoint |
+| `--force` | — | off | Overwrite existing outputs |
+| — | `GEN_TIMEOUT` | `240000` | Max wait per image, ms |
+| — | `DELAY_MS` | `8000` | Pause between images, ms |
+| — | `MAX_RETRY` | `2` | Retries per image |
 
 The default `PROMPT` targets portraits. It is wrong for most other images —
 always set `PROMPT` explicitly to match the actual edit the user asked for.
+
+### Knowing whether it worked
+
+Three signals, cheapest first.
+
+**Exit code.**
+
+| Code | Meaning |
+|---|---|
+| `0` | Every image produced a verified PNG, or was skipped as already done |
+| `1` | At least one image failed, or no images matched `--in` |
+| `2` | Fatal — rate limited, bad path, or the browser connection died |
+
+**Summary line**, last line on stderr:
+
+```
+done=1 skipped=0 failed=0 report=/path/to/out/report.json
+```
+
+**`report.json`**, written to the output directory on every run. One entry per
+image with `status` of `ok`, `skipped`, or `failed`, plus `bytes` on success and
+`error` on failure, and the exact prompt used:
+
+```json
+{
+  "finishedAt": "2026-10-03T10:05:39.049Z",
+  "prompt": "...",
+  "results": [
+    { "input": "/abs/in/photo.jpg", "output": "/abs/out/photo_out.png",
+      "status": "ok", "bytes": 1259988 }
+  ]
+}
+```
+
+Scripted check:
+
+```bash
+node gemini-batch.mjs --in ... --out ... --prompt "..." || echo "FAILED: $?"
+jq -r '.results[] | "\(.status)\t\(.output)"' out/report.json
+```
+
+Every saved file is checked for the PNG magic bytes and a sane size before being
+counted as `ok`, so `status: "ok"` means a real PNG landed on disk.
+
+That is the limit of what the script can prove. It cannot judge whether the edit
+is any good. **Open the output and look at it** — confirm the requested change
+happened and that everything meant to stay fixed actually did. Gemini will
+sometimes return a lightly altered copy of the input, which passes every
+automated check here.
 
 ### Writing the prompt
 
@@ -100,8 +166,8 @@ Structure: target region → what to reconstruct → named elements to preserve 
 
 ### Resuming
 
-An image is skipped when `out/<name>_out.{png,jpg,webp}` already exists. Safe to
-interrupt and re-run. To regenerate an image, delete its output first.
+An image is skipped when its output file already exists. Safe to interrupt and
+re-run. To regenerate, delete the output or pass `--force`.
 
 Run sequentially. Do not parallelize — concurrent chats trip Gemini's rate
 limits quickly and the script has no backoff for a hard block.
@@ -160,6 +226,8 @@ an upload or a send. Only `editor` and `addButton` must match there. A `MISS` on
 | Output file is the input image | `responseImage` matched the user turn | Re-scope to `generated-image` |
 | `RATE_LIMITED`, exit 2 | Account quota exhausted | Wait, re-run; resume skips finished images |
 | `NO_IMAGE_NODE` | Image not painted yet | Raise `GEN_TIMEOUT` |
+| `OUTPUT_NOT_PNG` / `OUTPUT_TOO_SMALL` | Canvas read returned garbage | Check the image actually finished loading; raise `GEN_TIMEOUT` |
+| `No images found in <path>`, exit 1 | Wrong `--in`, or no `.jpg/.jpeg/.png/.webp` in it | Fix the path |
 
 When generation times out, read the model's own reply before touching
 selectors — Gemini sometimes answers in text and never produces an image:
